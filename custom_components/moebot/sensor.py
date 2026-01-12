@@ -1,148 +1,126 @@
+from __future__ import annotations
+
 import logging
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass, SensorDeviceClass
-from homeassistant.const import (
-    PERCENTAGE, )
+from homeassistant.components.sensor import (
+    SensorEntity,
+    SensorDeviceClass,
+    SensorStateClass,
+)
+from homeassistant.const import PERCENTAGE
 from homeassistant.helpers.entity import EntityCategory
+
+from pymoebot import MoeBot
 
 from . import BaseMoeBotEntity
 from .const import DOMAIN
 
-_log = logging.getLogger()
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Add sensors for passed config_entry in HA."""
-    moebot = hass.data[DOMAIN][config_entry.entry_id]
+    """Set up MoeBot sensors."""
+    moebot: MoeBot = hass.data[DOMAIN][config_entry.entry_id]
 
     async_add_entities(
-        [MowingStateSensor(moebot), BatterySensor(moebot), EmergencyStateSensor(moebot), WorkModeSensor(moebot),
-         PyMoebotVersionSensor(moebot), TuyaVersionSensor(moebot)])
+        [
+            MowingStateSensor(moebot),
+            EmergencyStateSensor(moebot),
+            WorkModeSensor(moebot),
+            BatterySensor(moebot),
+            PyMoebotVersionSensor(moebot),
+            TuyaVersionSensor(moebot),
+        ]
+    )
 
 
-class SensorBase(BaseMoeBotEntity, SensorEntity):
-    def __init__(self, moebot):
-        """Initialize the sensor."""
+class MoeBotSensorBase(BaseMoeBotEntity, SensorEntity):
+    """Base class for MoeBot sensors."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._moebot.add_listener(self._handle_update)
+
+    def _handle_update(self, raw_msg: dict) -> None:
+        """Handle push update (thread-safe)."""
+        self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
 
-class MowingStateSensor(SensorBase):
-    def __init__(self, moebot):
+class MowingStateSensor(MoeBotSensorBase):
+    _attr_unique_id = None
+    _attr_name = "Mowing State"
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_state"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_state"
-
-        # The name of the entity
-        self._attr_name = f"Mowing State"
-
-        self._state = "UNKNOWN"
-
-    # The value of this sensor.
     @property
-    def state(self):
-        """Return the state of the sensor."""
+    def native_value(self) -> str | None:
         return self._moebot.state
 
 
-class EmergencyStateSensor(SensorBase):
-    def __init__(self, moebot):
+class EmergencyStateSensor(MoeBotSensorBase):
+    _attr_name = "Emergency State"
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_emergency_state"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_emergency_state"
-
-        # The name of the entity
-        self._attr_name = f"Emergency State"
-
-        self._state = "UNKNOWN"
-
-    # The value of this sensor.
     @property
-    def state(self):
-        """Return the state of the sensor."""
+    def native_value(self) -> str | None:
         return self._moebot.emergency_state
 
 
-class WorkModeSensor(SensorBase):
-    def __init__(self, moebot):
+class WorkModeSensor(MoeBotSensorBase):
+    _attr_name = "Work Mode"
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_work_mode"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_work_mode"
-
-        # The name of the entity
-        self._attr_name = f"Work Mode"
-
-        self._state = "UNKNOWN"
-
-    # The value of this sensor.
     @property
-    def state(self):
-        """Return the state of the sensor."""
+    def native_value(self) -> str | None:
         return self._moebot.work_mode
 
 
-class BatterySensor(SensorBase):
-    def __init__(self, moebot):
-        """Initialize the sensor."""
+class BatterySensor(MoeBotSensorBase):
+    _attr_name = "Battery"
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_battery"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_battery"
-
-        # The name of the entity
-        self._attr_name = f"Battery Level"
-
-        self._attr_device_class = SensorDeviceClass.BATTERY
-        self._attr_unit_of_measurement = PERCENTAGE
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    # The value of this sensor. As this is a SensorDeviceClass.BATTERY, this value must be
-    # the battery level as a percentage (between 0 and 100)
     @property
-    def state(self) -> int:
-        """Return the state of the sensor."""
-        return int(self._moebot.battery)
+    def native_value(self) -> int | None:
+        return round(self._moebot.battery)
 
 
-class PyMoebotVersionSensor(SensorBase):
-    def __init__(self, moebot):
+class PyMoebotVersionSensor(MoeBotSensorBase):
+    _attr_name = "pymoebot Version"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_pymoebot_version"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_pymoebot_version"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
-        # The name of the entity
-        self._attr_name = f"pymoebot Version"
-
-    # The value of this sensor.
     @property
-    def state(self):
-        """Return the state of the sensor."""
+    def native_value(self) -> str | None:
         return self._moebot.pymoebot_version
 
 
-class TuyaVersionSensor(SensorBase):
-    def __init__(self, moebot):
+class TuyaVersionSensor(MoeBotSensorBase):
+    _attr_name = "Tuya Protocol Version"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_tuya_version"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_tuya_version"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
-        # The name of the entity
-        self._attr_name = f"Tuya Protocol Version"
-
-    # The value of this sensor.
     @property
-    def state(self):
-        """Return the state of the sensor."""
+    def native_value(self) -> str | None:
         return self._moebot.tuya_version
