@@ -14,7 +14,6 @@ from pymoebot import MoeBot
 from .const import DOMAIN
 
 PLATFORMS: list[Platform] = [
-    Platform.VACUUM,
     Platform.SENSOR,
     Platform.NUMBER,
     Platform.SWITCH,
