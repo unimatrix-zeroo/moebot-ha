@@ -3,97 +3,92 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.vacuum import StateVacuumEntity, STATE_DOCKED, StateVacuumEntityDescription, \
-    STATE_CLEANING, STATE_RETURNING, STATE_ERROR, VacuumEntityFeature
+from homeassistant.components.vacuum import (
+    VacuumEntity,
+    VacuumEntityFeature,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_IDLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.icon import icon_for_battery_level
+
 from pymoebot import MoeBot
 
 from . import BaseMoeBotEntity
 from .const import DOMAIN
 
+_LOGGER = logging.getLogger(__name__)
+
 _STATUS_TO_HA = {
-    "STANDBY": STATE_DOCKED,
-    "MOWING": STATE_CLEANING,
-    "CHARGING": STATE_DOCKED,
-    "EMERGENCY": STATE_ERROR,
-    "LOCKED": STATE_ERROR,
-    "PAUSED": STATE_IDLE,
-    "PARK": STATE_RETURNING,
-    "CHARGING_WITH_TASK_SUSPEND": STATE_DOCKED,
-    "FIXED_MOWING": STATE_CLEANING,
-    "ERROR": STATE_ERROR,
+    "STANDBY": "docked",
+    "MOWING": "cleaning",
+    "FIXED_MOWING": "cleaning",
+    "PAUSED": "idle",
+    "PARK": "returning",
+    "CHARGING": "docked",
+    "CHARGING_WITH_TASK_SUSPEND": "docked",
+    "LOCKED": "error",
+    "EMERGENCY": "error",
+    "ERROR": "error",
 }
 
-_log = logging.getLogger(__package__)
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    moebot: MoeBot = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([MoeBotVacuumEntity(moebot)])
 
 
-async def async_setup_entry(hass: HomeAssistant,
-                            entry: ConfigEntry,
-                            async_add_entities: AddEntitiesCallback) -> None:
-    """Set up MoeBot from a config entry."""
-    moebot = hass.data[DOMAIN][entry.entry_id]
+class MoeBotVacuumEntity(BaseMoeBotEntity, VacuumEntity):
+    """Legacy vacuum entity (deprecated)."""
 
-    moebot_entity = MoeBotVacuumEntity(moebot)
-    async_add_entities([moebot_entity])
+    _attr_supported_features = (
+        VacuumEntityFeature.START
+        | VacuumEntityFeature.PAUSE
+        | VacuumEntityFeature.STOP
+        | VacuumEntityFeature.RETURN_HOME
+        | VacuumEntityFeature.BATTERY
+    )
 
+    _attr_icon = "mdi:robot-mower"
 
-class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
-    entity_description: StateVacuumEntityDescription
-
-    def __init__(self, moebot: MoeBot):
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_vacuum"
+        self._attr_name = "MoeBot (Legacy Vacuum)"
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_vacuum"
+        self._moebot.add_listener(self._handle_update)
 
-        self._attr_name = f"MoeBot"
-
-        self.__attr_icon = "mdi:robot-mower"
-
-        self._attr_supported_features = 0
-        self._attr_supported_features |= VacuumEntityFeature.PAUSE
-        self._attr_supported_features |= VacuumEntityFeature.STOP
-        self._attr_supported_features |= VacuumEntityFeature.RETURN_HOME
-        self._attr_supported_features |= VacuumEntityFeature.BATTERY
-        self._attr_supported_features |= VacuumEntityFeature.STATE
-        self._attr_supported_features |= VacuumEntityFeature.START
+    def _handle_update(self, raw_msg: dict) -> None:
+        self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
     @property
     def state(self) -> str | None:
-        mb_state = self._moebot.state
-        return _STATUS_TO_HA[mb_state]
-
-    @property
-    def battery_icon(self) -> str:
-        """Return the battery icon for the vacuum cleaner."""
-        charging = bool(self._moebot.state == "CHARGING" or self._moebot.state == "CHARGING_WITH_TASK_SUSPEND")
-
-        return icon_for_battery_level(
-            battery_level=self.battery_level, charging=charging
-        )
+        return _STATUS_TO_HA.get(self._moebot.state)
 
     @property
     def battery_level(self) -> int | None:
         return round(self._moebot.battery)
 
-    def start(self) -> None:
-        """Start or resume the cleaning task."""
-        self._moebot.start()
+    @property
+    def battery_icon(self) -> str:
+        charging = self._moebot.state in (
+            "CHARGING",
+            "CHARGING_WITH_TASK_SUSPEND",
+        )
+        return icon_for_battery_level(self.battery_level, charging)
 
-    def pause(self) -> None:
-        """Pause the cleaning task."""
-        self._moebot.pause()
+    async def async_start(self) -> None:
+        await self.hass.async_add_executor_job(self._moebot.start)
 
-    def stop(self, **kwargs: Any) -> None:
-        self._moebot.cancel()
+    async def async_pause(self) -> None:
+        await self.hass.async_add_executor_job(self._moebot.pause)
 
-    def return_to_base(self, **kwargs: Any) -> None:
-        self._moebot.dock()
+    async def async_stop(self, **kwargs: Any) -> None:
+        await self.hass.async_add_executor_job(self._moebot.cancel)
 
-    def clean_spot(self, **kwargs: Any) -> None:
-        self._moebot.start(spiral=True)
+    async def async_return_to_base(self, **kwargs: Any) -> None:
+        await self.hass.async_add_executor_job(self._moebot.dock)
