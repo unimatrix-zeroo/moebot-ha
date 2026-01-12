@@ -1,22 +1,30 @@
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from homeassistant.components.number import NumberEntity, NumberMode, NumberDeviceClass
+from homeassistant.components.number import (
+    NumberEntity,
+    NumberMode,
+    NumberDeviceClass,
+)
 from homeassistant.helpers.entity import EntityCategory
-from pymoebot import ZoneConfig, MoeBot
+
+from pymoebot import MoeBot, ZoneConfig
 
 from . import BaseMoeBotEntity
 from .const import DOMAIN
 
-_log = logging.getLogger(__package__)
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Add sensors for passed config_entry in HA."""
-    moebot = hass.data[DOMAIN][config_entry.entry_id]
+    """Set up MoeBot number entities."""
+    moebot: MoeBot = hass.data[DOMAIN][config_entry.entry_id]
 
-    entities = [WorkingTimeNumber(moebot)]
+    entities: list[NumberEntity] = [WorkingTimeNumber(moebot)]
+
     for zone in range(1, 6):
         for part in ZoneNumberType:
             entities.append(ZoneConfigNumber(moebot, zone, part))
@@ -24,88 +32,110 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     async_add_entities(entities)
 
 
-class WorkingTimeNumber(BaseMoeBotEntity, NumberEntity):
+class MoeBotNumberBase(BaseMoeBotEntity, NumberEntity):
+    """Base class for MoeBot numbers."""
 
-    def __init__(self, moebot):
+    _attr_has_entity_name = True
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
+        self._moebot.add_listener(self._handle_update)
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_mow_time_hrs"
-        self._attr_entity_category = EntityCategory.CONFIG
+    def _handle_update(self, raw_msg: dict) -> None:
+        self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
-        self._attr_name = f"Mowing Time"
 
-        self._attr_native_min_value = 1
-        self._attr_native_max_value = 12
-        self._attr_native_step = 1
-        self._attr_mode = NumberMode.SLIDER
-        self._attr_device_class = NumberDeviceClass.DURATION
-        self._number_option_unit_of_measurement = "hrs"
+class WorkingTimeNumber(MoeBotNumberBase):
+    _attr_name = "Mowing Time"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_native_min_value = 1
+    _attr_native_max_value = 12
+    _attr_native_step = 1
+    _attr_mode = NumberMode.SLIDER
+    _attr_device_class = NumberDeviceClass.DURATION
+    _attr_native_unit_of_measurement = "h"
+
+    def __init__(self, moebot: MoeBot) -> None:
+        super().__init__(moebot)
+        self._attr_unique_id = f"{moebot.id}_mow_time_hrs"
 
     @property
-    def native_value(self) -> float:
+    def native_value(self) -> float | None:
         return self._moebot.mow_time
 
-    def set_native_value(self, value: float) -> None:
-        self._moebot.mow_time = int(value)
+    async def async_set_native_value(self, value: float) -> None:
+        await self.hass.async_add_executor_job(
+            setattr, self._moebot, "mow_time", int(value)
+        )
 
 
-@dataclass
-class ZoneTypeDataMixin:
+@dataclass(frozen=True)
+class ZoneTypeData:
     type_name: str
     position: int
 
 
-class ZoneNumberType(ZoneTypeDataMixin, Enum):
-    DISTANCE = 'Distance', 0
-    RATIO = 'Ratio', 1
+class ZoneNumberType(ZoneTypeData, Enum):
+    DISTANCE = ("Distance", 0)
+    RATIO = ("Ratio", 1)
 
 
-class ZoneConfigNumber(BaseMoeBotEntity, NumberEntity):
-    def __init__(self, moebot: MoeBot, zone: int, part: ZoneNumberType):
+class ZoneConfigNumber(MoeBotNumberBase):
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_native_min_value = 0
+    _attr_native_step = 1
+    _attr_mode = NumberMode.BOX
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, moebot: MoeBot, zone: int, part: ZoneNumberType) -> None:
         super().__init__(moebot)
         self.zone = zone
         self.part = part
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
-        self._attr_unique_id = f"{self._moebot.id}_zone{self.zone}_{self.part.value.type_name.lower()}"
-        self._attr_entity_category = EntityCategory.CONFIG
+        self._attr_unique_id = (
+            f"{moebot.id}_zone{zone}_{part.value.type_name.lower()}"
+        )
+        self._attr_name = f"Zone {zone} {part.value.type_name}"
 
-        self._attr_name = f"Zone {self.zone} {self.part.value.type_name}"
+        self._attr_native_max_value = (
+            100 if part == ZoneNumberType.RATIO else 200
+        )
+        self._attr_native_unit_of_measurement = (
+            "%" if part == ZoneNumberType.RATIO else "m"
+        )
+        self._attr_device_class = (
+            NumberDeviceClass.DISTANCE
+            if part == ZoneNumberType.DISTANCE
+            else None
+        )
 
-        self._attr_native_min_value = 0
-        self._attr_native_max_value = 100 if self.part == ZoneNumberType.RATIO else 200
-        self._attr_native_step = 1
-        self._attr_mode = NumberMode.BOX
-        self._number_option_unit_of_measurement = "%" if self.part == ZoneNumberType.RATIO else "m"
-        self._attr_device_class = NumberDeviceClass.DISTANCE if self.part == ZoneNumberType.DISTANCE else None
-
-        self._attr_entity_registry_enabled_default = False
-
-    @classmethod
-    def zone_config_to_list(cls, zc: ZoneConfig):
-        return [int(zc.zone1[0]), int(zc.zone1[1]),
-                int(zc.zone2[0]), int(zc.zone2[1]),
-                int(zc.zone3[0]), int(zc.zone3[1]),
-                int(zc.zone4[0]), int(zc.zone4[1]),
-                int(zc.zone5[0]), int(zc.zone5[1]),
-                ]
+    @staticmethod
+    def _zone_config_to_list(zc: ZoneConfig) -> list[int]:
+        return [
+            int(zc.zone1[0]), int(zc.zone1[1]),
+            int(zc.zone2[0]), int(zc.zone2[1]),
+            int(zc.zone3[0]), int(zc.zone3[1]),
+            int(zc.zone4[0]), int(zc.zone4[1]),
+            int(zc.zone5[0]), int(zc.zone5[1]),
+        ]
 
     @property
-    def native_value(self) -> float:
+    def native_value(self) -> float | None:
         if not self._moebot.zones:
-            _log.debug("Zone data hasn't been retrieved, can't provide values")
+            _LOGGER.debug("Zone data not yet available")
+            return None
+
+        values = self._zone_config_to_list(self._moebot.zones)
+        return values[(2 * (self.zone - 1)) + self.part.value.position]
+
+    async def async_set_native_value(self, value: float) -> None:
+        if not self._moebot.zones:
             return
 
-        zone_values = ZoneConfigNumber.zone_config_to_list(self._moebot.zones)
+        values = self._zone_config_to_list(self._moebot.zones)
+        values[(2 * (self.zone - 1)) + self.part.value.position] = int(value)
 
-        return zone_values[(2 * (self.zone - 1)) + self.part.value.position]
-
-    def set_native_value(self, value: float) -> None:
-        new_zone_values = ZoneConfigNumber.zone_config_to_list(self._moebot.zones)
-        new_zone_values[(2 * (self.zone - 1)) + self.part.value.position] = int(value)
-
-        zc = ZoneConfig(*new_zone_values)
-        self._moebot.zones = zc
+        zc = ZoneConfig(*values)
+        await self.hass.async_add_executor_job(
+            setattr, self._moebot, "zones", zc
+        )
